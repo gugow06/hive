@@ -364,6 +364,16 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
   };
 }
 
+/**
+ * Claude Code moved the login command under an `auth` group: `claude auth login`.
+ * The bare `claude login` of older builds is gone, and the current CLI does not
+ * reject it — it treats "login" as a prompt, prints an assistant reply and exits
+ * 0, so the login URL never appears and the caller sees a successful run with no
+ * URL. Ask for `auth login` first and fall back to the legacy form only when the
+ * CLI says it does not know the `auth` command.
+ */
+const CLAUDE_UNKNOWN_COMMAND_RE = /unknown command|unknown argument|unrecognized (?:command|option)/i;
+
 export async function runClaudeLogin(input: {
   runId: string;
   agent: AdapterExecutionContext["agent"];
@@ -381,13 +391,20 @@ export async function runClaudeLogin(input: {
     authToken: input.authToken,
   });
 
-  const proc = await runAdapterExecutionTargetProcess(input.runId, null, runtime.command, ["login"], {
-    cwd: runtime.cwd,
-    env: runtime.env,
-    timeoutSec: runtime.timeoutSec,
-    graceSec: runtime.graceSec,
-    onLog,
-  });
+  const spawnLogin = (args: string[]) =>
+    runAdapterExecutionTargetProcess(input.runId, null, runtime.command, args, {
+      cwd: runtime.cwd,
+      env: runtime.env,
+      timeoutSec: runtime.timeoutSec,
+      graceSec: runtime.graceSec,
+      onLog,
+    });
+
+  let proc = await spawnLogin(["auth", "login"]);
+  if (proc.exitCode !== 0 && CLAUDE_UNKNOWN_COMMAND_RE.test(`${proc.stdout}\n${proc.stderr}`)) {
+    await onLog("stdout", "[paperclip] `claude auth login` is not supported by this CLI; retrying `claude login`.\n");
+    proc = await spawnLogin(["login"]);
+  }
 
   const loginMeta = detectClaudeLoginRequired({
     parsed: null,

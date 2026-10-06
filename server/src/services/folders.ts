@@ -1,6 +1,6 @@
 import { and, asc, eq, max, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companySkills, folders, routines } from "@paperclipai/db";
+import { companySkills, folders, memoryDocuments, routines } from "@paperclipai/db";
 import type {
   CreateFolder,
   Folder,
@@ -156,10 +156,24 @@ export function folderService(db: Db, mutationLockHeld = false) {
       .groupBy(companySkills.folderId);
   }
 
+  async function memoryCounts(companyId: string) {
+    return db
+      .select({ folderId: memoryDocuments.folderId, count: sql<number>`count(*)::int` })
+      .from(memoryDocuments)
+      .where(eq(memoryDocuments.companyId, companyId))
+      .groupBy(memoryDocuments.folderId);
+  }
+
+  function countsForKind(companyId: string, kind: FolderKind) {
+    if (kind === "routine") return routineCounts(companyId);
+    if (kind === "memory") return memoryCounts(companyId);
+    return skillCounts(companyId);
+  }
+
   async function list(companyId: string, kind: FolderKind): Promise<FolderListResult> {
     const [folderRows, countRows] = await Promise.all([
       getRows(companyId, kind),
-      kind === "routine" ? routineCounts(companyId) : skillCounts(companyId),
+      countsForKind(companyId, kind),
     ]);
     const views = buildFolderViews(folderRows);
     const countsByFolderId = new Map<string | null, number>();
@@ -378,6 +392,16 @@ export function folderService(db: Db, mutationLockHeld = false) {
         .returning({ id: routines.id, folderId: routines.folderId })
         .then((rows) => rows[0] ?? null);
       if (!row) throw notFound("Routine not found");
+      return { kind: input.kind, itemId: row.id, folderId: row.folderId ?? null };
+    }
+    if (input.kind === "memory") {
+      const row = await db
+        .update(memoryDocuments)
+        .set({ folderId: input.folderId ?? null, updatedAt: new Date() })
+        .where(and(eq(memoryDocuments.companyId, companyId), eq(memoryDocuments.id, input.itemId)))
+        .returning({ id: memoryDocuments.id, folderId: memoryDocuments.folderId })
+        .then((rows) => rows[0] ?? null);
+      if (!row) throw notFound("Memory document not found");
       return { kind: input.kind, itemId: row.id, folderId: row.folderId ?? null };
     }
     const existing = await db

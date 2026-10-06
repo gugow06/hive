@@ -320,6 +320,18 @@ export function classifyClaudeTerminalSessionFailure(
   failure: AcpxTerminalSessionFailure,
   now: Date,
 ): AcpxTerminalFailureClassification | null {
+  // `access` is the agent's own report that it could not authenticate or was
+  // denied authorization. Left unclassified the run carries no error code, so
+  // the user interface shows the bare "ACP agent reported a terminal access
+  // failure." with no login affordance and no stranded notice. Emit the same
+  // code the Claude CLI lane emits, which both surfaces already read. The
+  // category alone drives this — no provider text is inspected. No errorFamily:
+  // the families are retry/recovery labels and none of them describes auth, so
+  // an auth failure keeps the default no-family handling rather than being
+  // mislabeled as transient and replayed.
+  if (failure.category === "access") {
+    return { errorCode: CLAUDE_AUTH_REQUIRED_ERROR_CODE };
+  }
   // `limit` also includes context, turn, rate and configured budget limits.
   // Only the provider's quota wording qualifies for a quota wait.
   if (failure.category !== "limit") return null;

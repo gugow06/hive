@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const folderKindSchema = z.enum(["routine", "skill"]);
+export const folderKindSchema = z.enum(["routine", "skill", "memory"]);
 export const folderSlugSchema = z.string().trim().min(1).max(120).regex(
   /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
   "Folder slug must contain only lowercase letters, numbers, and single hyphens",

@@ -315,6 +315,18 @@ export function InstanceExperimentalSettings() {
         />
 
         <ExperimentalToggleCard
+          title="Memory"
+          description="A knowledge base of Markdown documents organised in folders, linked to each other with [[wikilinks]]. Adds the Memory page under Work."
+          footnote="Turning Memory off hides the page; existing documents and folders are kept."
+          checked={experimentalQuery.data?.enableMemory ?? false}
+          onCheckedChange={(checked) => toggleMutation.mutate({ enableMemory: checked })}
+          disabled={toggleMutation.isPending}
+          settingKey="enableMemory"
+          managed={managedKeys.enableMemory}
+          ariaLabel="Toggle memory experimental setting"
+        />
+
+        <ExperimentalToggleCard
           title="Agent Chat"
           description="Talk to each agent in one ongoing conversation. Clarify goals and create tasks for execution."
           footnote="Turning this off preserves conversations and lets active runs finish, but prevents new messages."

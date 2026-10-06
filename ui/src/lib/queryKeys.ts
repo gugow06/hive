@@ -446,6 +446,11 @@ export const queryKeys = {
     list: (companyId: string, kind: string) =>
       ["folders", companyId, kind] as const,
   },
+  memoryDocuments: {
+    list: (companyId: string) => ["memory-documents", companyId] as const,
+    detail: (companyId: string, documentId: string) =>
+      ["memory-documents", companyId, documentId] as const,
+  },
   pipelines: {
     list: (companyId: string) => ["pipelines", companyId] as const,
     detail: (pipelineId: string) =>

@@ -7,6 +7,20 @@ import {
 } from "./company-routes";
 
 describe("company routes", () => {
+  it("treats Memory as a company-scoped board route", () => {
+    expect(isBoardPathWithoutPrefix("/memory")).toBe(true);
+    expect(extractCompanyPrefixFromPath("/memory")).toBeNull();
+    expect(applyCompanyPrefix("/memory", "TES")).toBe("/TES/memory");
+    // Already prefixed paths must not be prefixed twice.
+    expect(applyCompanyPrefix("/TES/memory", "TES")).toBe("/TES/memory");
+    expect(extractCompanyPrefixFromPath("/TES/memory")).toBe("TES");
+    expect(toCompanyRelativePath("/TES/memory")).toBe("/memory");
+  });
+
+  it("keeps the selected document query string when prefixing Memory", () => {
+    expect(applyCompanyPrefix("/memory?doc=abc-123", "TES")).toBe("/TES/memory?doc=abc-123");
+  });
+
   it("treats the task-list alias as an unprefixed board route", () => {
     expect(isBoardPathWithoutPrefix("/tasks")).toBe(true);
     expect(extractCompanyPrefixFromPath("/tasks")).toBeNull();

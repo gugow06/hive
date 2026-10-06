@@ -2609,6 +2609,14 @@ export type {
   MoveFolderItemRequest,
   EnsureMySkillFolderRequest,
 } from "./types/folder.js";
+export type {
+  MemoryDocument,
+  MemoryDocumentListItem,
+  MemoryDocumentListResult,
+  CreateMemoryDocumentRequest,
+  UpdateMemoryDocumentRequest,
+  MoveMemoryDocumentRequest,
+} from "./types/memory-document.js";
 
 export {
   adapterRegistryEntrySchema,
@@ -2632,6 +2640,19 @@ export {
   type MoveFolderItem,
   type EnsureMySkillFolder,
 } from "./validators/folder.js";
+
+export {
+  memoryDocumentSlugSchema,
+  memoryDocumentSchema,
+  memoryDocumentListItemSchema,
+  memoryDocumentListResultSchema,
+  createMemoryDocumentSchema,
+  updateMemoryDocumentSchema,
+  moveMemoryDocumentSchema,
+  type CreateMemoryDocument,
+  type UpdateMemoryDocument,
+  type MoveMemoryDocument,
+} from "./validators/memory-document.js";
 
 export {
   environmentCustomImageTemplateKindSchema,
