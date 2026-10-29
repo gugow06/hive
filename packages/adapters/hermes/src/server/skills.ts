@@ -9,6 +9,7 @@ import type {
 import {
   ensurePaperclipSkillSymlink,
   isPaperclipSkillSourceMissing,
+  isSameSkillTargetPath,
   readInstalledSkillTargets,
   readPaperclipRuntimeSkillEntries,
   resolveLegacyPaperclipDesiredSkillNames,
@@ -237,9 +238,36 @@ export async function reconcileHermesPaperclipSkills(
     const resolvedSource = linkedSource
       ? path.resolve(path.dirname(target), linkedSource)
       : null;
-    if (resolvedSource !== path.resolve(entry.source)) {
+    // The link must point at THIS installation's skill source. Compare paths in a
+    // platform-correct way (Windows is case-insensitive) so a link created earlier
+    // through a differently-cased path is adopted instead of failing the whole run.
+    const isOwnLink =
+      resolvedSource !== null && (await isSameSkillTargetPath(resolvedSource, entry.source));
+    if (resolvedSource === null) {
+      // A real directory (not a symlink) already sits at the target. Keep it when it
+      // is a usable copy of the same skill, otherwise it really is foreign.
+      const targetStat = await fs.lstat(target).catch(() => null);
+      const targetSkillMd = await fs
+        .readFile(path.join(target, "SKILL.md"), "utf8")
+        .catch(() => null);
+      const sourceSkillMd = await fs.readFile(path.join(entry.source, "SKILL.md"), "utf8").catch(
+        () => null,
+      );
+      const adoptableCopy =
+        targetStat?.isDirectory() === true &&
+        targetSkillMd !== null &&
+        sourceSkillMd !== null &&
+        targetSkillMd === sourceSkillMd;
+      if (adoptableCopy) {
+        continue;
+      }
       throw new Error(
         `Cannot reconcile Hermes skill "${entry.key}" because ${target} is occupied by another installation.`,
+      );
+    }
+    if (!isOwnLink) {
+      throw new Error(
+        `Cannot reconcile Hermes skill "${entry.key}" because ${target} points to ${resolvedSource} instead of ${path.resolve(entry.source)}.`,
       );
     }
   }

@@ -3198,3 +3198,89 @@ describe("reconcileReusedExecutionWorkspaceProjectWorkspaceId", () => {
     ).toBe("resolved-workspace");
   });
 });
+
+describe("resolveNextSessionState PHO-85 interrupted-run continuity", () => {
+  const localSessionId =
+    "local-b233e8477a8c35f91d5e0c775b189803a3d7b0124f7b258d9402f40f647e8c4d";
+
+  it("adopts the session a failed Hermes run reported when there is no earlier session", () => {
+    const result = resolveNextSessionState({
+      adapterType: "hermes_local",
+      codec: truncatingHermesSessionCodec,
+      adapterResult: {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        sessionId: localSessionId,
+        sessionParams: { sessionId: localSessionId },
+        errorMessage: "Hermes gateway disconnected mid-turn",
+      },
+      outcome: "failed",
+      previousParams: null,
+      previousDisplayId: null,
+      previousLegacySessionId: null,
+    });
+
+    expect(result.params).toEqual({ sessionId: localSessionId });
+    expect(result.legacySessionId).toBe(localSessionId);
+    expect(result.displayId).toBeTruthy();
+  });
+
+  it("adopts a bare local-style session id reported without sessionParams", () => {
+    const result = resolveNextSessionState({
+      adapterType: "hermes_local",
+      codec: truncatingHermesSessionCodec,
+      adapterResult: {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        sessionId: localSessionId,
+      },
+      outcome: "failed",
+      previousParams: null,
+      previousDisplayId: null,
+      previousLegacySessionId: null,
+    });
+
+    expect(result.params).toEqual({ sessionId: localSessionId });
+  });
+
+  it("never adopts a prose token scraped from the disconnect advice", () => {
+    const result = resolveNextSessionState({
+      adapterType: "hermes_local",
+      codec: truncatingHermesSessionCodec,
+      adapterResult: {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        sessionId: "to",
+        sessionParams: { sessionId: "to" },
+      },
+      outcome: "failed",
+      previousParams: null,
+      previousDisplayId: null,
+      previousLegacySessionId: null,
+    });
+
+    expect(result).toEqual({ params: null, displayId: null, legacySessionId: null });
+  });
+
+  it("still prefers the earlier valid session when the failed run reports another one", () => {
+    const result = resolveNextSessionState({
+      adapterType: "hermes_local",
+      codec: truncatingHermesSessionCodec,
+      adapterResult: {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        sessionId: localSessionId,
+      },
+      outcome: "failed",
+      previousParams: { sessionId: "20260601_141558_c861e4" },
+      previousDisplayId: "20260601_141558_c861e4",
+      previousLegacySessionId: "20260601_141558_c861e4",
+    });
+
+    expect(result.params).toEqual({ sessionId: "20260601_141558_c861e4" });
+  });
+});

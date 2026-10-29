@@ -5193,6 +5193,20 @@ function normalizeBilledCostCents(
   return Math.max(0, Math.round(costUsd * 100));
 }
 
+/**
+ * Micro-dollar equivalent of `normalizeBilledCostCents`. Whole cents cannot represent
+ * a cheap run (US$0.0017 rounds to 0), so the ledger keeps micros as the exact amount
+ * and derives cents only for budget comparisons.
+ */
+function normalizeBilledCostMicros(
+  costUsd: number | null | undefined,
+  billingType: BillingType,
+): number {
+  if (billingType === "subscription_included") return 0;
+  if (typeof costUsd !== "number" || !Number.isFinite(costUsd)) return 0;
+  return Math.max(0, Math.round(costUsd * 1_000_000));
+}
+
 export function resolveLedgerCostStatus(input: {
   costUsd: number | null | undefined;
   inputTokens: number;
@@ -9024,8 +9038,20 @@ export function resolveSkillTestRunCompletionForHeartbeatOutcome(
 }
 
 const HERMES_ADAPTER_TYPE = "hermes_local";
+/**
+ * Session ids the Hermes CLI actually prints.
+ *
+ * - `YYYYMMDD_HHMMSS_<suffix>` — the legacy file-backed session id.
+ * - `local-<64 hex>` — what every current release prints (`Session:` footer,
+ *   `hermes --resume <id>`, quiet-mode `session_id:`). Absent from this pattern,
+ *   `isCanonicalSessionIdForAdapter` rejected every real id, so
+ *   `resolveNextSessionState` discarded it and each heartbeat opened a brand new
+ *   session: no run in the instance ever logged "Resuming session", and the work
+ *   of a run that died mid-turn was redone from scratch (PHO-85).
+ * - A UUID, for hosts whose session store is database-backed.
+ */
 const HERMES_SESSION_ID_REGEX =
-  /^(?:\d{8}_\d{6}_[A-Za-z0-9_-]{4,}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+  /^(?:\d{8}_\d{6}_[A-Za-z0-9_-]{4,}|local-[A-Za-z0-9_-]{8,}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
 
 function requiresCanonicalSessionIds(adapterType: string | null | undefined) {
   return adapterType === HERMES_ADAPTER_TYPE;
@@ -9161,7 +9187,35 @@ export function resolveNextSessionState(input: {
   };
 
   if (input.outcome !== "succeeded") {
-    return previousState();
+    const previous = previousState();
+    if (previous.params) return previous;
+    // A failed run usually has nothing worth carrying forward, so an earlier
+    // session wins. With no earlier session at all there is nothing to lose by
+    // adopting the one the adapter reported — and for Hermes that is the whole
+    // point: an interrupted turn prints its session id and says to resume it
+    // rather than resend the work. Dropping it here made every retry start a new
+    // session and redo what the dead run had already written (PHO-85).
+    const reported = normalizeResumeParamsForAdapter(
+      adapterType,
+      input.adapterResult.sessionParams,
+    ) ?? normalizeResumeParamsForAdapter(
+      adapterType,
+      readNonEmptyString(input.adapterResult.sessionId)
+        ? { sessionId: readNonEmptyString(input.adapterResult.sessionId) }
+        : null,
+    );
+    const reportedSessionId = readNonEmptyString(reported?.sessionId);
+    if (!reportedSessionId) return previous;
+    const serialized = normalizeResumeParamsForAdapter(
+      adapterType,
+      codec.serialize(reported),
+    );
+    if (!serialized) return previous;
+    return {
+      params: serialized,
+      displayId: truncateDisplayId(readNonEmptyString(serialized.sessionId) ?? reportedSessionId),
+      legacySessionId: readNonEmptyString(serialized.sessionId) ?? reportedSessionId,
+    };
   }
 
   const explicitParams = adapterResult.sessionParams;
@@ -16634,7 +16688,7 @@ export function heartbeatService(
     if (checkCostCap && policy.maxDailyCostCents !== null) {
       const [row] = await client
         .select({
-          total: sql<number>`coalesce(sum(${costEvents.costCents})::bigint, 0)`,
+          total: sql<number>`coalesce(sum(greatest(${costEvents.costMicros}::double precision, ${costEvents.costCents}::double precision * 10000)) / 10000.0, 0)`,
         })
         .from(costEvents)
         .where(
@@ -19629,6 +19683,10 @@ export function heartbeatService(
       billedCostUsd,
       billingType,
     );
+    const additionalCostMicros = normalizeBilledCostMicros(
+      billedCostUsd,
+      billingType,
+    );
     const hasTokenUsage =
       inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
     const costStatus = resolveLedgerCostStatus({
@@ -19657,6 +19715,7 @@ export function heartbeatService(
         totalOutputTokens: sql`${agentRuntimeState.totalOutputTokens} + ${outputTokens}`,
         totalCachedInputTokens: sql`${agentRuntimeState.totalCachedInputTokens} + ${cachedInputTokens}`,
         totalCostCents: sql`${agentRuntimeState.totalCostCents} + ${additionalCostCents}`,
+        totalCostMicros: sql`${agentRuntimeState.totalCostMicros} + ${additionalCostMicros}`,
         updatedAt: new Date(),
       })
       .where(eq(agentRuntimeState.agentId, agent.id));
@@ -19678,6 +19737,7 @@ export function heartbeatService(
         cachedInputTokens,
         outputTokens,
         costCents: additionalCostCents,
+        costMicros: additionalCostMicros,
         occurredAt: new Date(),
       });
     }
@@ -29526,6 +29586,26 @@ export function heartbeatService(
         );
         if (!timerClaim) continue;
 
+        // PHO-74: a timer wake must know which card it belongs to. Without an
+        // issue id in the snapshot, the run is treated as cross-issue for every
+        // write target (403 cross_issue_influence_run_context_required) and the
+        // adapter never receives PAPERCLIP_TASK_ID, so the agent wakes up with
+        // no task to act on. Assume the agent's most recently updated in-progress
+        // card; with no such card the wake stays an unscoped exploratory run.
+        const assumedIssue = await db
+          .select({ id: issues.id })
+          .from(issues)
+          .where(
+            and(
+              eq(issues.companyId, agent.companyId),
+              eq(issues.assigneeAgentId, agent.id),
+              eq(issues.status, "in_progress"),
+            ),
+          )
+          .orderBy(desc(issues.updatedAt))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+
         const run = await enqueueWakeup(agent.id, {
           source: "timer",
           triggerDetail: "system",
@@ -29537,6 +29617,7 @@ export function heartbeatService(
             reason: "interval_elapsed",
             now: now.toISOString(),
             timerClaimWasFirstHeartbeat: timerClaim.wasFirstHeartbeat,
+            ...(assumedIssue ? { issueId: assumedIssue.id, taskId: assumedIssue.id } : {}),
           },
         });
         if (run) enqueued += 1;

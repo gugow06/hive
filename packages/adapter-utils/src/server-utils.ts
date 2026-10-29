@@ -216,6 +216,10 @@ export const DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE = [
   "- Prefer the smallest verification that proves the change; do not default to full workspace typecheck/build/test on every heartbeat unless the task scope warrants it.",
   "- After 2 consecutive failures of the same control-plane write, stop retrying that write for the rest of the heartbeat. Continue useful work, report the failure in the final response, and rely on the adapter/runtime status channel as the sanctioned fallback.",
   "- Use child issues for parallel or long delegated work instead of polling agents, sessions, or processes.",
+  "- Batch independent tool calls into the SAME turn (one message with several calls) instead of one call per turn: each extra turn costs a full model round-trip.",
+  "- Never re-read a file or re-run a command you already ran in this heartbeat; reuse the output you have.",
+  "- Long-running installs/builds: check whether the workspace already satisfies the dependency (e.g. existing node_modules / lockfile hash) before running an install again, and run genuine long jobs in the background instead of blocking a turn on them.",
+  "- Prefer one decisive verification command over a sequence of exploratory commands; stop exploring once the change is proven.",
   "- If woken by a human comment on a dependency-blocked issue, respond or triage the comment without treating the blocked deliverable work as unblocked.",
   "- Create child issues directly when you know what needs to be done; use issue-thread interactions when the board/user must choose suggested tasks, answer structured questions, or confirm a proposal.",
   "- Use `PAPERCLIP_SCRATCH_DIR` / `PAPERCLIP_RUN_SCRATCH_DIR` for temporary scratch files instead of ad hoc `/tmp` paths; Paperclip removes that run-owned directory after the run ends.",
@@ -4211,6 +4215,37 @@ export function writePaperclipSkillSyncPreference(
   return next;
 }
 
+/**
+ * Compares two filesystem paths that are expected to designate the SAME skill
+ * directory. On Windows the comparison must be case-insensitive and separator
+ * agnostic: a skill linked from `E:\LOCAL\Hive\skills\x` is the same directory
+ * as `E:\Local\hive\skills\x`, but a raw string compare says otherwise and the
+ * reconciler then refuses the link with "occupied by another installation",
+ * failing every run of the agent.
+ *
+ * When both paths exist, `realpath` is the authority (it also resolves 8.3 short
+ * names and junctions); the normalized string compare is the fallback for
+ * paths that do not exist yet.
+ */
+export async function isSameSkillTargetPath(a: string, b: string): Promise<boolean> {
+  const normalize = (value: string): string => {
+    let resolved = path.resolve(value).replace(/[\\/]+/g, path.sep);
+    while (resolved.length > 1 && /[\\/]$/.test(resolved)) {
+      resolved = resolved.slice(0, -1);
+    }
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+
+  if (normalize(a) === normalize(b)) return true;
+
+  const [realA, realB] = await Promise.all([
+    fs.realpath(a).catch(() => null),
+    fs.realpath(b).catch(() => null),
+  ]);
+  if (realA && realB) return normalize(realA) === normalize(realB);
+  return false;
+}
+
 export async function ensurePaperclipSkillSymlink(
   source: string,
   target: string,
@@ -4233,7 +4268,7 @@ export async function ensurePaperclipSkillSymlink(
   if (!linkedPath) return "skipped";
 
   const resolvedLinkedPath = path.resolve(path.dirname(target), linkedPath);
-  if (resolvedLinkedPath === source) {
+  if (await isSameSkillTargetPath(resolvedLinkedPath, source)) {
     return "skipped";
   }
 

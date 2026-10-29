@@ -86,7 +86,7 @@ export function dashboardService(db: Db) {
       const runActivityStart = new Date(`${runActivityDays[0]}T00:00:00.000Z`);
       const [{ monthSpend }] = await db
         .select({
-          monthSpend: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+          monthSpend: sql<number>`coalesce(sum(greatest(${costEvents.costMicros}::double precision, ${costEvents.costCents}::double precision * 10000)), 0)::double precision / 10000.0`,
         })
         .from(costEvents)
         .where(

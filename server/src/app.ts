@@ -1095,6 +1095,21 @@ export async function createApp(
     });
     const renderViteHtml = viteHtmlRenderer;
 
+    // Pre-warm the UI entry so Vite resolves and optimizes its dependency
+    // graph before the browser makes its first request. Without this, the
+    // first load races the on-demand dep optimizer: requests for
+    // /node_modules/.vite/deps/* land mid-bundle, time out with 504, and can
+    // leave a partially-written cache that surfaces as
+    // "Cannot read properties of null (reading 'useEffect')".
+    try {
+      await vite.environments.client.warmupRequest("/index.html");
+    } catch (err) {
+      // Warmup is best-effort: a failure here must not block server boot.
+      vite.config.logger.warn(
+        `[ui] dep pre-warm failed (server will still boot): ${(err as Error).message}`,
+      );
+    }
+
     if (fs.existsSync(publicUiRoot)) {
       app.use(express.static(publicUiRoot, { index: false }));
     }

@@ -28,15 +28,20 @@ vi.mock("@paperclipai/adapter-utils/server-utils", async (importOriginal) => {
 });
 
 // Mock fs and path resolution to avoid real file reads in execute()
-vi.mock("node:fs/promises", () => ({
-  readFile: vi.fn(async () => ""),
-  writeFile: vi.fn(async () => undefined),
-  mkdir: vi.fn(async () => undefined),
-  rm: vi.fn(async () => undefined),
-  access: vi.fn(async () => undefined),
-  readdir: vi.fn(async () => []),
-  stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false })),
-}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    readFile: vi.fn(async () => ""),
+    writeFile: vi.fn(async () => undefined),
+    mkdir: vi.fn(async () => undefined),
+    rm: vi.fn(async () => undefined),
+    unlink: vi.fn(async () => undefined),
+    access: vi.fn(async () => undefined),
+    readdir: vi.fn(async () => []),
+    stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false })),
+  };
+});
 
 import { execute } from "./execute.js";
 import * as serverUtils from "@paperclipai/adapter-utils/server-utils";

@@ -15,9 +15,22 @@ export interface CostDateRange {
 const METERED_BILLING_TYPE = "metered_api";
 const SUBSCRIPTION_BILLING_TYPES = ["subscription_included", "subscription_overage"] as const;
 
-function sumAsNumber(column: typeof costEvents.costCents | typeof costEvents.inputTokens | typeof costEvents.cachedInputTokens | typeof costEvents.outputTokens) {
+function sumAsNumber(column: typeof costEvents.costCents | typeof costEvents.costMicros | typeof costEvents.inputTokens | typeof costEvents.cachedInputTokens | typeof costEvents.outputTokens) {
   return sql<number>`coalesce(sum(${column}), 0)::double precision`;
 }
+
+/**
+ * Ledger total in CENTS derived from the micro-dollar column.
+ *
+ * `cost_events.cost_cents` is an integer column, so summing it silently drops every
+ * run cheaper than one cent (a US$0.0017 DeepSeek run → 0). Micros keep the exact
+ * amount; the API keeps returning cents (now possibly fractional) so existing
+ * budgets, dashboards and reports keep working.
+ */
+function sumMicrosAsCents() {
+  return sql<number>`coalesce(sum(greatest(${costEvents.costMicros}::double precision, ${costEvents.costCents}::double precision * 10000)), 0)::double precision / 10000.0`;
+}
+
 
 function currentUtcMonthWindow(now = new Date()) {
   const year = now.getUTCFullYear();
@@ -43,7 +56,7 @@ async function getMonthlySpendTotal(
   }
   const [row] = await db
     .select({
-      total: sumAsNumber(costEvents.costCents),
+      total: sumMicrosAsCents(),
     })
     .from(costEvents)
     .where(and(...conditions));
@@ -73,6 +86,10 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           biller: data.biller ?? data.provider,
           billingType: data.billingType ?? "unknown",
           cachedInputTokens: data.cachedInputTokens ?? 0,
+          // Manual events (POST /costs/events) only carry cents; keep micros in sync
+          // so every reader can rely on the micro column being populated.
+          costMicros:
+            data.costMicros ?? Math.max(0, Math.round((data.costCents ?? 0) * 10000)),
         })
         .returning()
         .then((rows) => rows[0]);
@@ -118,7 +135,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
 
       const [{ total }] = await db
         .select({
-          total: sumAsNumber(costEvents.costCents),
+          total: sumMicrosAsCents(),
         })
         .from(costEvents)
         .where(and(...conditions));
@@ -237,7 +254,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         db
           .select({
             issueCount: sql<number>`count(distinct ${issues.id})::int`,
-            costCents: sumAsNumber(costEvents.costCents),
+            costCents: sumMicrosAsCents(),
             inputTokens: sumAsNumber(costEvents.inputTokens),
             cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
             outputTokens: sumAsNumber(costEvents.outputTokens),
@@ -289,7 +306,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           agentName: agents.name,
           agentAppearance: agents.appearance,
           agentStatus: agents.status,
-          costCents: sumAsNumber(costEvents.costCents),
+          costCents: sumMicrosAsCents(),
           inputTokens: sumAsNumber(costEvents.inputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
@@ -308,7 +325,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .leftJoin(agents, eq(costEvents.agentId, agents.id))
         .where(and(...conditions))
         .groupBy(costEvents.agentId, agents.name, agents.appearance, agents.status)
-        .orderBy(desc(sumAsNumber(costEvents.costCents)));
+        .orderBy(desc(sumMicrosAsCents()));
       return rows.map(row => {
         const appearance = resolveAgentAppearance(row.agentAppearance, row.agentId);
         return { ...row, agentAppearance: appearance, avatarUrl: agentAvatarUrl(appearance, 512) };
@@ -326,7 +343,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           biller: costEvents.biller,
           billingType: costEvents.billingType,
           model: costEvents.model,
-          costCents: sumAsNumber(costEvents.costCents),
+          costCents: sumMicrosAsCents(),
           inputTokens: sumAsNumber(costEvents.inputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
@@ -344,7 +361,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .from(costEvents)
         .where(and(...conditions))
         .groupBy(costEvents.provider, costEvents.biller, costEvents.billingType, costEvents.model)
-        .orderBy(desc(sumAsNumber(costEvents.costCents)));
+        .orderBy(desc(sumMicrosAsCents()));
     },
 
     byBiller: async (companyId: string, range?: CostDateRange) => {
@@ -355,7 +372,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       return db
         .select({
           biller: costEvents.biller,
-          costCents: sumAsNumber(costEvents.costCents),
+          costCents: sumMicrosAsCents(),
           inputTokens: sumAsNumber(costEvents.inputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
@@ -375,7 +392,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .from(costEvents)
         .where(and(...conditions))
         .groupBy(costEvents.biller)
-        .orderBy(desc(sumAsNumber(costEvents.costCents)));
+        .orderBy(desc(sumMicrosAsCents()));
     },
 
     /**
@@ -397,7 +414,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
             .select({
               provider: costEvents.provider,
               biller: sql<string>`case when count(distinct ${costEvents.biller}) = 1 then min(${costEvents.biller}) else 'mixed' end`,
-              costCents: sumAsNumber(costEvents.costCents),
+              costCents: sumMicrosAsCents(),
               inputTokens: sumAsNumber(costEvents.inputTokens),
               cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
               outputTokens: sumAsNumber(costEvents.outputTokens),
@@ -410,7 +427,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
               ),
             )
             .groupBy(costEvents.provider)
-            .orderBy(desc(sumAsNumber(costEvents.costCents)));
+            .orderBy(desc(sumMicrosAsCents()));
 
           return rows.map((row) => ({
             provider: row.provider,
@@ -446,7 +463,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           biller: costEvents.biller,
           billingType: costEvents.billingType,
           model: costEvents.model,
-          costCents: sumAsNumber(costEvents.costCents),
+          costCents: sumMicrosAsCents(),
           inputTokens: sumAsNumber(costEvents.inputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
@@ -501,7 +518,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
       if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
 
-      const costCentsExpr = sumAsNumber(costEvents.costCents);
+      const costCentsExpr = sumMicrosAsCents();
 
       return db
         .select({

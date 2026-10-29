@@ -6541,7 +6541,7 @@ export function companySkillService(db: Db) {
     const rows = await db
       .select({
         issueId: costEvents.issueId,
-        costCents: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int`,
+        costCents: sql<number>`coalesce(sum(greatest(${costEvents.costMicros}::double precision, ${costEvents.costCents}::double precision * 10000)) / 10000.0, 0)`,
         inputTokens: sql<number>`coalesce(sum(${costEvents.inputTokens}), 0)::int`,
         cachedInputTokens: sql<number>`coalesce(sum(${costEvents.cachedInputTokens}), 0)::int`,
         outputTokens: sql<number>`coalesce(sum(${costEvents.outputTokens}), 0)::int`,

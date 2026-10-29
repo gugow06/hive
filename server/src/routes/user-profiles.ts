@@ -124,7 +124,7 @@ function dayKeyExpr(dateSql: ReturnType<typeof sql>) {
   return sql<string>`to_char(date_trunc('day', ${dateSql}), 'YYYY-MM-DD')`;
 }
 
-function sumNumber(column: typeof costEvents.costCents | typeof costEvents.inputTokens | typeof costEvents.cachedInputTokens | typeof costEvents.outputTokens) {
+function sumNumber(column: unknown) {
   return sql<number>`coalesce(sum(${column}), 0)::double precision`;
 }
 
@@ -178,7 +178,7 @@ async function loadWindowStats(
   if (from) costConditions.push(gte(costEvents.occurredAt, from));
   const [costStats] = await db
     .select({
-      costCents: sumNumber(costEvents.costCents),
+      costCents: sumNumber(sql`greatest(${costEvents.costMicros}::double precision, ${costEvents.costCents}::double precision * 10000)`),
       inputTokens: sumNumber(costEvents.inputTokens),
       cachedInputTokens: sumNumber(costEvents.cachedInputTokens),
       outputTokens: sumNumber(costEvents.outputTokens),
@@ -270,7 +270,7 @@ async function loadDailyStats(db: Db, companyId: string, userId: string): Promis
   const costRows = await db
     .select({
       date: costDay,
-      costCents: sumNumber(costEvents.costCents),
+      costCents: sumNumber(sql`greatest(${costEvents.costMicros}::double precision, ${costEvents.costCents}::double precision * 10000)`),
       inputTokens: sumNumber(costEvents.inputTokens),
       cachedInputTokens: sumNumber(costEvents.cachedInputTokens),
       outputTokens: sumNumber(costEvents.outputTokens),
@@ -363,7 +363,7 @@ export function userProfileRoutes(db: Db) {
         .select({
           agentId: costEvents.agentId,
           agentName: agents.name,
-          costCents: sumNumber(costEvents.costCents),
+          costCents: sumNumber(sql`greatest(${costEvents.costMicros}::double precision, ${costEvents.costCents}::double precision * 10000)`),
           inputTokens: sumNumber(costEvents.inputTokens),
           cachedInputTokens: sumNumber(costEvents.cachedInputTokens),
           outputTokens: sumNumber(costEvents.outputTokens),
@@ -373,14 +373,14 @@ export function userProfileRoutes(db: Db) {
         .leftJoin(agents, eq(agents.id, costEvents.agentId))
         .where(and(eq(costEvents.companyId, companyId), userIssueInvolvementSql(companyId, userId)))
         .groupBy(costEvents.agentId, agents.name)
-        .orderBy(desc(sumNumber(costEvents.costCents)))
+        .orderBy(desc(sumNumber(sql`greatest(${costEvents.costMicros}::double precision, ${costEvents.costCents}::double precision * 10000)`)))
         .limit(5),
       db
         .select({
           provider: costEvents.provider,
           biller: costEvents.biller,
           model: costEvents.model,
-          costCents: sumNumber(costEvents.costCents),
+          costCents: sumNumber(sql`greatest(${costEvents.costMicros}::double precision, ${costEvents.costCents}::double precision * 10000)`),
           inputTokens: sumNumber(costEvents.inputTokens),
           cachedInputTokens: sumNumber(costEvents.cachedInputTokens),
           outputTokens: sumNumber(costEvents.outputTokens),
@@ -389,7 +389,7 @@ export function userProfileRoutes(db: Db) {
         .innerJoin(issues, and(eq(issues.id, costEvents.issueId), eq(issues.companyId, costEvents.companyId)))
         .where(and(eq(costEvents.companyId, companyId), userIssueInvolvementSql(companyId, userId)))
         .groupBy(costEvents.provider, costEvents.biller, costEvents.model)
-        .orderBy(desc(sumNumber(costEvents.costCents)))
+        .orderBy(desc(sumNumber(sql`greatest(${costEvents.costMicros}::double precision, ${costEvents.costCents}::double precision * 10000)`)))
         .limit(5),
     ]);
 

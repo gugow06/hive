@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, integer, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, integer, bigint, index } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { issues } from "./issues.js";
@@ -26,6 +26,11 @@ export const costEvents = pgTable(
     cachedInputTokens: integer("cached_input_tokens").notNull().default(0),
     outputTokens: integer("output_tokens").notNull().default(0),
     costCents: integer("cost_cents").notNull(),
+    // Billed cost in micro-dollars (USD x 1e6). `costCents` rounds to whole cents,
+    // which silently erases cheap runs (a US$0.0017 run -> 0 cents) and left every
+    // cost indicator at zero. Micros are authoritative; `costCents` stays for
+    // budget comparisons and readers that have not moved to micros yet.
+    costMicros: bigint("cost_micros", { mode: "number" }).notNull().default(0),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
