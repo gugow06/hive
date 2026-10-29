@@ -29526,6 +29526,26 @@ export function heartbeatService(
         );
         if (!timerClaim) continue;
 
+        // PHO-74: a timer wake must know which card it belongs to. Without an
+        // issue id in the snapshot, the run is treated as cross-issue for every
+        // write target (403 cross_issue_influence_run_context_required) and the
+        // adapter never receives PAPERCLIP_TASK_ID, so the agent wakes up with
+        // no task to act on. Assume the agent's most recently updated in-progress
+        // card; with no such card the wake stays an unscoped exploratory run.
+        const assumedIssue = await db
+          .select({ id: issues.id })
+          .from(issues)
+          .where(
+            and(
+              eq(issues.companyId, agent.companyId),
+              eq(issues.assigneeAgentId, agent.id),
+              eq(issues.status, "in_progress"),
+            ),
+          )
+          .orderBy(desc(issues.updatedAt))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+
         const run = await enqueueWakeup(agent.id, {
           source: "timer",
           triggerDetail: "system",
@@ -29537,6 +29557,7 @@ export function heartbeatService(
             reason: "interval_elapsed",
             now: now.toISOString(),
             timerClaimWasFirstHeartbeat: timerClaim.wasFirstHeartbeat,
+            ...(assumedIssue ? { issueId: assumedIssue.id, taskId: assumedIssue.id } : {}),
           },
         });
         if (run) enqueued += 1;
