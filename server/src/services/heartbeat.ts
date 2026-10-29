@@ -5193,6 +5193,20 @@ function normalizeBilledCostCents(
   return Math.max(0, Math.round(costUsd * 100));
 }
 
+/**
+ * Micro-dollar equivalent of `normalizeBilledCostCents`. Whole cents cannot represent
+ * a cheap run (US$0.0017 rounds to 0), so the ledger keeps micros as the exact amount
+ * and derives cents only for budget comparisons.
+ */
+function normalizeBilledCostMicros(
+  costUsd: number | null | undefined,
+  billingType: BillingType,
+): number {
+  if (billingType === "subscription_included") return 0;
+  if (typeof costUsd !== "number" || !Number.isFinite(costUsd)) return 0;
+  return Math.max(0, Math.round(costUsd * 1_000_000));
+}
+
 export function resolveLedgerCostStatus(input: {
   costUsd: number | null | undefined;
   inputTokens: number;
@@ -16634,7 +16648,7 @@ export function heartbeatService(
     if (checkCostCap && policy.maxDailyCostCents !== null) {
       const [row] = await client
         .select({
-          total: sql<number>`coalesce(sum(${costEvents.costCents})::bigint, 0)`,
+          total: sql<number>`coalesce(sum(greatest(${costEvents.costMicros}::double precision, ${costEvents.costCents}::double precision * 10000)) / 10000.0, 0)`,
         })
         .from(costEvents)
         .where(
@@ -19629,6 +19643,10 @@ export function heartbeatService(
       billedCostUsd,
       billingType,
     );
+    const additionalCostMicros = normalizeBilledCostMicros(
+      billedCostUsd,
+      billingType,
+    );
     const hasTokenUsage =
       inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
     const costStatus = resolveLedgerCostStatus({
@@ -19657,6 +19675,7 @@ export function heartbeatService(
         totalOutputTokens: sql`${agentRuntimeState.totalOutputTokens} + ${outputTokens}`,
         totalCachedInputTokens: sql`${agentRuntimeState.totalCachedInputTokens} + ${cachedInputTokens}`,
         totalCostCents: sql`${agentRuntimeState.totalCostCents} + ${additionalCostCents}`,
+        totalCostMicros: sql`${agentRuntimeState.totalCostMicros} + ${additionalCostMicros}`,
         updatedAt: new Date(),
       })
       .where(eq(agentRuntimeState.agentId, agent.id));
@@ -19678,6 +19697,7 @@ export function heartbeatService(
         cachedInputTokens,
         outputTokens,
         costCents: additionalCostCents,
+        costMicros: additionalCostMicros,
         occurredAt: new Date(),
       });
     }

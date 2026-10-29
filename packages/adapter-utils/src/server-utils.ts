@@ -4211,6 +4211,37 @@ export function writePaperclipSkillSyncPreference(
   return next;
 }
 
+/**
+ * Compares two filesystem paths that are expected to designate the SAME skill
+ * directory. On Windows the comparison must be case-insensitive and separator
+ * agnostic: a skill linked from `E:\LOCAL\Hive\skills\x` is the same directory
+ * as `E:\Local\hive\skills\x`, but a raw string compare says otherwise and the
+ * reconciler then refuses the link with "occupied by another installation",
+ * failing every run of the agent.
+ *
+ * When both paths exist, `realpath` is the authority (it also resolves 8.3 short
+ * names and junctions); the normalized string compare is the fallback for
+ * paths that do not exist yet.
+ */
+export async function isSameSkillTargetPath(a: string, b: string): Promise<boolean> {
+  const normalize = (value: string): string => {
+    let resolved = path.resolve(value).replace(/[\\/]+/g, path.sep);
+    while (resolved.length > 1 && /[\\/]$/.test(resolved)) {
+      resolved = resolved.slice(0, -1);
+    }
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+
+  if (normalize(a) === normalize(b)) return true;
+
+  const [realA, realB] = await Promise.all([
+    fs.realpath(a).catch(() => null),
+    fs.realpath(b).catch(() => null),
+  ]);
+  if (realA && realB) return normalize(realA) === normalize(realB);
+  return false;
+}
+
 export async function ensurePaperclipSkillSymlink(
   source: string,
   target: string,
@@ -4233,7 +4264,7 @@ export async function ensurePaperclipSkillSymlink(
   if (!linkedPath) return "skipped";
 
   const resolvedLinkedPath = path.resolve(path.dirname(target), linkedPath);
-  if (resolvedLinkedPath === source) {
+  if (await isSameSkillTargetPath(resolvedLinkedPath, source)) {
     return "skipped";
   }
 

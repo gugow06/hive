@@ -45,6 +45,8 @@ export const VALID_PROVIDERS = [
   "minimax",
   "minimax-cn",
   "kilocode",
+  "deepseek",
+  "xai",
 ] as const;
 
 /**
@@ -76,7 +78,9 @@ export const MODEL_PREFIX_PROVIDER_HINTS: [string, string][] = [
   // MiniMax
   ["minimax", "minimax"],
   // DeepSeek
-  ["deepseek", "auto"],
+  ["deepseek", "deepseek"],
+  // xAI Grok / Grok Build
+  ["grok", "xai"],
   // Meta Llama
   ["llama", "auto"],
   // Qwen

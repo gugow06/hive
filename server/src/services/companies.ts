@@ -184,7 +184,7 @@ export function companyService(db: Db) {
     const rows = await database
         .select({
           companyId: costEvents.companyId,
-          spentMonthlyCents: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+          spentMonthlyCents: sql<number>`coalesce((sum(greatest(${costEvents.costMicros}::double precision, ${costEvents.costCents}::double precision * 10000)) / 10000.0), 0)::double precision`,
         })
       .from(costEvents)
       .where(

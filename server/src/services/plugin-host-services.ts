@@ -1181,7 +1181,7 @@ export function buildHostServices(
     const scopeCondition = scopeConditions.length === 1 ? scopeConditions[0]! : and(...scopeConditions);
     const [row] = await db
       .select({
-        costCents: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+        costCents: sql<number>`coalesce(sum(greatest(${costEvents.costMicros}::double precision, ${costEvents.costCents}::double precision * 10000)) / 10000.0, 0)`,
         inputTokens: sql<number>`coalesce(sum(${costEvents.inputTokens}), 0)::double precision`,
         cachedInputTokens: sql<number>`coalesce(sum(${costEvents.cachedInputTokens}), 0)::double precision`,
         outputTokens: sql<number>`coalesce(sum(${costEvents.outputTokens}), 0)::double precision`,

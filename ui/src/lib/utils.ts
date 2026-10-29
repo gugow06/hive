@@ -34,7 +34,12 @@ export function asFiniteNumber(value: unknown, fallback: number) {
 }
 
 export function formatCents(cents: number): string {
-  return `$${(cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const amount = cents / 100;
+  // Sub-dollar amounts are real for LLM runs (a DeepSeek flash run costs a fraction of
+  // a cent). Rounding those to "$0.00" is what made the cost indicator look broken, so
+  // show up to 4 decimals below $1.
+  const fractionDigits = amount !== 0 && Math.abs(amount) < 1 ? 4 : 2;
+  return `$${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: fractionDigits })}`;
 }
 
 export function formatNumber(n: number): string {

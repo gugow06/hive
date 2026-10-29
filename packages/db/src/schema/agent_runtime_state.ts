@@ -16,6 +16,8 @@ export const agentRuntimeState = pgTable(
     totalOutputTokens: bigint("total_output_tokens", { mode: "number" }).notNull().default(0),
     totalCachedInputTokens: bigint("total_cached_input_tokens", { mode: "number" }).notNull().default(0),
     totalCostCents: bigint("total_cost_cents", { mode: "number" }).notNull().default(0),
+    /** Billed cost in micro-dollars (USD x 1e6) - mirrors cost_events.cost_micros. */
+    totalCostMicros: bigint("total_cost_micros", { mode: "number" }).notNull().default(0),
     lastError: text("last_error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

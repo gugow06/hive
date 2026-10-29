@@ -19,7 +19,9 @@
  */
 
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { readHermesSessionUsage } from "./session-usage.js";
 
 import type {
   AdapterExecutionContext,
@@ -77,6 +79,71 @@ function cfgStringArray(v: unknown): string[] | undefined {
 
 export function resolveHermesCommand(config: Record<string, unknown>): string {
   return cfgString(config.hermesCommand) || cfgString(config.command) || HERMES_CLI;
+}
+
+// ---------------------------------------------------------------------------
+// Run environment file
+// ---------------------------------------------------------------------------
+// Hermes executes the agent's tool commands through a long-lived exec service
+// (the gateway), whose environment is NOT the agent process environment. The
+// PAPERCLIP_* vars are set on the agent process, but inside a run they are
+// missing from `env` and from `$PAPERCLIP_API_KEY` in the shell, so API writes
+// go out unauthenticated and the board records them as `local-board` with a
+// null authorAgentId.
+//
+// Fix: materialize the identity vars into a per-run shell file (mode 0600) and
+// tell the agent to source it before calling the API.
+
+const PAPERCLIP_RUN_ENV_KEYS = [
+  "PAPERCLIP_API_URL",
+  "PAPERCLIP_API_KEY",
+  "PAPERCLIP_RUN_ID",
+  "PAPERCLIP_TASK_ID",
+  "PAPERCLIP_AGENT_ID",
+  "PAPERCLIP_COMPANY_ID",
+  "PAPERCLIP_WAKE_REASON",
+  "PAPERCLIP_WAKE_COMMENT_ID",
+  "PAPERCLIP_SCRATCH_DIR",
+  "PAPERCLIP_RUN_SCRATCH_DIR",
+  "PAPERCLIP_TASK_SCRATCH_DIR",
+] as const;
+
+export function runEnvFilePath(runId: string): string {
+  return path.join(os.tmpdir(), `paperclip-hermes-runenv-${runId}.sh`);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/** POSIX `export` lines for the run identity vars; null when none are present. */
+export function renderRunEnvShell(env: Record<string, string | undefined>): string | null {
+  const lines: string[] = ["# Paperclip run environment — generated per run, safe to delete"];
+  let count = 0;
+  for (const key of PAPERCLIP_RUN_ENV_KEYS) {
+    const value = env[key];
+    if (typeof value !== "string" || value.length === 0) continue;
+    lines.push(`export ${key}=${shellQuote(value)}`);
+    count += 1;
+  }
+  if (count === 0) return null;
+  return `${lines.join("\n")}\n`;
+}
+
+export function runEnvPromptNote(runEnvFile: string): string {
+  return [
+    "## Shell environment — required before every Paperclip API call",
+    "",
+    "The `PAPERCLIP_*` variables are set on the agent process, but the shell that runs your",
+    "commands does not inherit them. Load them first in every command that calls the API:",
+    "",
+    "```bash",
+    `set -a; . ${shellQuote(runEnvFile)}; set +a`,
+    "```",
+    "",
+    "Without that line `$PAPERCLIP_API_KEY` is empty and the API records your writes as",
+    "`local-board` with a null authorAgentId, so you cannot edit or delete your own comments.",
+  ].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +291,9 @@ const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
 /** Regex for legacy session output format */
 const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
 
+/** Session id printed in the non-quiet summary block: `Session:  20261026_114032_776f76` */
+const SESSION_SUMMARY_ID_REGEX = /^Session:\s+([A-Za-z0-9_-]{6,})\s*$/m;
+
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
   /tokens?[:\s]+(\d+)\s*(?:input|in)\b.*?(\d+)\s*(?:output|out)\b/i;
@@ -293,6 +363,16 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
     const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
     if (legacyMatch?.[1]) {
       result.sessionId = legacyMatch?.[1] ?? null;
+    } else {
+      // Non-quiet mode ends with a summary block:
+      //   Session:        20261026_114032_776f76
+      //   Duration:       58s
+      // Without the session id we cannot read the real token usage/cost from the
+      // Hermes session store, so this line is load-bearing for cost accounting.
+      const summaryMatch = combined.match(SESSION_SUMMARY_ID_REGEX);
+      if (summaryMatch?.[1]) {
+        result.sessionId = summaryMatch[1];
+      }
     }
     // In non-quiet mode, extract clean response from stdout by
     // filtering out tool lines, system messages, and noise
@@ -432,16 +512,73 @@ export async function execute(
     }
   }
 
+  // ── Build environment ──────────────────────────────────────────────────
+  const userEnv = config.env as Record<string, string> | undefined;
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    ...(userEnv && typeof userEnv === "object" ? userEnv : {}),
+    ...buildPaperclipEnv(ctx.agent),
+    ...buildRuntimeToolsEnv(ctx.runtimeTools),
+  };
+
+  if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
+
+  // PAPERCLIP_API_KEY is never accepted from config — the harness-minted run
+  // token is the only source of Paperclip API identity.
+  delete env.PAPERCLIP_API_KEY;
+  if ((ctx as any).authToken) env.PAPERCLIP_API_KEY = (ctx as any).authToken;
+
+  // BUG FIX: Read task context from ctx.context (wake context), not ctx.config (adapter config)
+  const ctxContext = (ctx as any).context || {};
+  const envTaskId = cfgString(ctxContext.taskId) || cfgString(ctxContext.issueId) || cfgString(ctx.config?.taskId);
+  if (envTaskId) env.PAPERCLIP_TASK_ID = envTaskId;
+  const envWakeReason = cfgString(ctxContext.wakeReason) || cfgString(ctx.config?.wakeReason);
+  if (envWakeReason) env.PAPERCLIP_WAKE_REASON = envWakeReason;
+  const envCommentId = cfgString(ctxContext.commentId) || cfgString(ctxContext.wakeCommentId) || cfgString(ctx.config?.commentId);
+  if (envCommentId) env.PAPERCLIP_WAKE_COMMENT_ID = envCommentId;
+  const wakePayloadJson = stringifyPaperclipWakePayload(ctxContext.paperclipWake);
+  if (wakePayloadJson) env.PAPERCLIP_WAKE_PAYLOAD_JSON = wakePayloadJson;
+
+  // The tool shell does not inherit this environment (see runEnvFilePath), so
+  // hand the identity vars over through a per-run file the agent sources.
+  let runEnvFile: string | null = null;
+  if (ctx.runId) {
+    const shellEnv = renderRunEnvShell(env);
+    if (shellEnv) {
+      const candidate = runEnvFilePath(ctx.runId);
+      try {
+        await fs.writeFile(candidate, shellEnv, { encoding: "utf-8", mode: 0o600 });
+        runEnvFile = candidate;
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        await ctx.onLog(
+          "stdout",
+          `[hermes] Warning: could not write run env file "${candidate}": ${reason}\n`,
+        );
+      }
+    }
+  }
+
   // ── Build prompt ───────────────────────────────────────────────────────
   let prompt = buildPrompt(ctx, config, { resumedSession: Boolean(prevSessionId) });
   if (agentInstructions) {
     prompt = agentInstructions + "\n\n---\n\n" + prompt;
   }
+  if (runEnvFile) {
+    prompt += "\n\n" + runEnvPromptNote(runEnvFile) + "\n";
+  }
 
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
   const useQuiet = cfgBoolean(config.quiet) === true; // default false
-  const args: string[] = ["chat", "-q", prompt];
+  // Write the prompt to a temp file and pass --query-file. Passing the full
+  // prompt via -q hits the Windows command-line length limit (~32KB) and
+  // spawn fails with ENAMETOOLONG for large wake payloads (agent instructions
+  // + execution contract + task markdown). --query-file reads from disk with
+  // no length limit and no shell interpretation.
+  const promptFile = path.join(os.tmpdir(), `paperclip-hermes-prompt-${ctx.runId ?? Date.now()}.txt`);
+  await fs.writeFile(promptFile, prompt, "utf-8");
+  const args: string[] = ["chat", "--query-file", promptFile];
   if (useQuiet) args.push("-Q");
 
   if (model) {
@@ -484,33 +621,6 @@ export async function execute(
   if (extraArgs?.length) {
     args.push(...extraArgs);
   }
-
-  // ── Build environment ──────────────────────────────────────────────────
-  const userEnv = config.env as Record<string, string> | undefined;
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    ...(userEnv && typeof userEnv === "object" ? userEnv : {}),
-    ...buildPaperclipEnv(ctx.agent),
-    ...buildRuntimeToolsEnv(ctx.runtimeTools),
-  };
-
-  if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
-
-  // PAPERCLIP_API_KEY is never accepted from config — the harness-minted run
-  // token is the only source of Paperclip API identity.
-  delete env.PAPERCLIP_API_KEY;
-  if ((ctx as any).authToken) env.PAPERCLIP_API_KEY = (ctx as any).authToken;
-
-  // BUG FIX: Read task context from ctx.context (wake context), not ctx.config (adapter config)
-  const ctxContext = (ctx as any).context || {};
-  const envTaskId = cfgString(ctxContext.taskId) || cfgString(ctxContext.issueId) || cfgString(ctx.config?.taskId);
-  if (envTaskId) env.PAPERCLIP_TASK_ID = envTaskId;
-  const envWakeReason = cfgString(ctxContext.wakeReason) || cfgString(ctx.config?.wakeReason);
-  if (envWakeReason) env.PAPERCLIP_WAKE_REASON = envWakeReason;
-  const envCommentId = cfgString(ctxContext.commentId) || cfgString(ctxContext.wakeCommentId) || cfgString(ctx.config?.commentId);
-  if (envCommentId) env.PAPERCLIP_WAKE_COMMENT_ID = envCommentId;
-  const wakePayloadJson = stringifyPaperclipWakePayload(ctxContext.paperclipWake);
-  if (wakePayloadJson) env.PAPERCLIP_WAKE_PAYLOAD_JSON = wakePayloadJson;
 
   // ── Resolve working directory ──────────────────────────────────────────
   const cwd =
@@ -564,10 +674,65 @@ export async function execute(
     graceSec,
     onLog: wrappedOnLog,
     onSpawn: ctx.onSpawn,
+  }).finally(async () => {
+    // Holds the run token: remove it as soon as the child process is gone.
+    if (runEnvFile) await fs.unlink(runEnvFile).catch(() => {});
   });
 
   // ── Parse output ───────────────────────────────────────────────────────
   const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
+
+  // ── Real usage & cost (source of truth: Hermes' own session store) ──────
+  // The stdout-regex scrape almost never matches (quiet mode prints only the
+  // response + session_id), which is why every run used to land with zero tokens
+  // and zero cost. Read the session row instead; a resumed session keeps cumulative
+  // totals, so return the DELTA since the previous run of the same session.
+  const sessionUsage = await readHermesSessionUsage(config, parsed.sessionId).catch(() => null);
+  const previousTotals = (() => {
+    const raw = (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.usageTotals;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+    const record = raw as Record<string, unknown>;
+    return {
+      inputTokens: Number(record.inputTokens ?? 0) || 0,
+      outputTokens: Number(record.outputTokens ?? 0) || 0,
+      cachedInputTokens: Number(record.cachedInputTokens ?? 0) || 0,
+      costUsd: Number(record.costUsd ?? 0) || 0,
+    };
+  })();
+  const sameSession =
+    previousTotals !== null &&
+    typeof parsed.sessionId === "string" &&
+    prevSessionId === parsed.sessionId;
+  const runUsage = (() => {
+    if (!sessionUsage) return null;
+    const baseline =
+      sameSession && previousTotals
+        ? previousTotals
+        : { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, costUsd: 0 };
+    return {
+      inputTokens: Math.max(0, sessionUsage.inputTokens - baseline.inputTokens),
+      outputTokens: Math.max(0, sessionUsage.outputTokens - baseline.outputTokens),
+      cachedInputTokens: Math.max(0, sessionUsage.cachedInputTokens - baseline.cachedInputTokens),
+      costUsd:
+        sessionUsage.costUsd === null
+          ? null
+          : Math.max(0, sessionUsage.costUsd - baseline.costUsd),
+    };
+  })();
+  if (runUsage) {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] Usage: in=${runUsage.inputTokens} out=${runUsage.outputTokens} cached=${runUsage.cachedInputTokens} api_calls=${sessionUsage?.apiCalls ?? 0} cost_usd=${
+        runUsage.costUsd === null ? "unknown" : runUsage.costUsd.toFixed(6)
+      }${sessionUsage?.costStatus ? ` (${sessionUsage.costStatus})` : ""}\n`,
+    );
+  } else if (parsed.sessionId) {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] Usage unavailable: no session row found for ${parsed.sessionId}\n`,
+    );
+  }
+
 
   await ctx.onLog(
     "stdout",
@@ -592,13 +757,31 @@ export async function execute(
     executionResult.errorMessage = `Hermes exited with code ${result.exitCode}`;
   }
 
-  if (parsed.usage) {
-    executionResult.usage = parsed.usage;
+  // Prefer the session-store usage (real tokens + cost); keep the legacy stdout
+  // scrape as a fallback for environments where the store is not reachable.
+  const usageSource = runUsage ?? parsed.usage ?? null;
+  if (usageSource) {
+    executionResult.usage = {
+      inputTokens: usageSource.inputTokens,
+      outputTokens: usageSource.outputTokens,
+      ...(usageSource.cachedInputTokens ? { cachedInputTokens: usageSource.cachedInputTokens } : {}),
+    } as AdapterExecutionResult["usage"];
+    executionResult.usageBasis = "per_run";
   }
 
-  if (parsed.costUsd !== undefined) {
-    executionResult.costUsd = parsed.costUsd;
+  const costUsd = runUsage?.costUsd ?? parsed.costUsd ?? null;
+  if (costUsd !== null) {
+    executionResult.costUsd = costUsd;
   }
+
+  if (sessionUsage) {
+    // The session store is authoritative about what actually ran and how it bills.
+    if (sessionUsage.model) executionResult.model = sessionUsage.model;
+    if (sessionUsage.provider) executionResult.provider = sessionUsage.provider;
+    executionResult.billingType =
+      sessionUsage.costStatus === "included" ? "subscription_included" : "metered_api";
+  }
+
 
   // Summary from agent response
   if (parsed.response) {
@@ -609,13 +792,28 @@ export async function execute(
   executionResult.resultJson = {
     result: parsed.response || "",
     session_id: parsed.sessionId || null,
-    usage: parsed.usage || null,
-    cost_usd: parsed.costUsd ?? null,
+    usage: executionResult.usage ?? null,
+    cost_usd: costUsd,
+    cost_status: sessionUsage?.costStatus ?? null,
+    api_calls: sessionUsage?.apiCalls ?? null,
   };
 
   // Store session ID for next run
   if (persistSession && parsed.sessionId) {
-    executionResult.sessionParams = { sessionId: parsed.sessionId };
+    executionResult.sessionParams = {
+      sessionId: parsed.sessionId,
+      // Cumulative session totals, so the next resumed run can report only its delta.
+      ...(sessionUsage
+        ? {
+            usageTotals: {
+              inputTokens: sessionUsage.inputTokens,
+              outputTokens: sessionUsage.outputTokens,
+              cachedInputTokens: sessionUsage.cachedInputTokens,
+              costUsd: sessionUsage.costUsd ?? 0,
+            },
+          }
+        : {}),
+    };
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
   }
 
